@@ -97,6 +97,10 @@ nav.hide{transform:translateY(-110%)}
 .ready .hero-tag .rule{transform:none}
 .hero h1{font-family:Anton,Impact,sans-serif;font-weight:400;letter-spacing:.005em;font-size:clamp(64px,min(28vw,calc((100svh - 470px) / 1.72)),420px);line-height:.86}
 .hero h1 .outline{color:transparent;-webkit-text-stroke:2px var(--fg);transition:color .5s ease}
+/* hero letters: JS flies them in along splines, then rides them on a spring-driven spline baseline */
+.hero h1 .ln{overflow:visible}
+.hero h1 .ch{transform:none;transform-origin:50% 62%;transition:opacity .4s ease;will-change:transform}
+.hero h1:not(.in) .ch{opacity:0}
 @media (hover:hover) and (pointer:fine){.hero h1 .outline:hover{color:var(--acc);-webkit-text-stroke-color:var(--acc)}}
 .hero-meta{display:grid;grid-template-columns:1.1fr 1.4fr 1fr;gap:24px;margin-top:clamp(24px,4vw,48px);padding-top:20px;border-top:1px solid var(--line);align-items:start}
 .hero-meta p{color:var(--muted);max-width:44ch;font-size:15px}
@@ -721,6 +725,93 @@ footer button{color:var(--fg)}
   }
   $$('.split').forEach(split);
 
+  /* ---- hero name: spline letter animation ----
+     enter(): each letter flies home along its own Catmull-Rom spline (WAAPI on `transform`).
+     tick():  letters then ride a spring-driven spline baseline that bends toward the cursor
+              (JS sets `translate` + `rotate`, which compose with the entrance `transform`). */
+  const heroSpline = (() => {
+    const N = 7;
+    const lines = $$('#heroTitle .ln').map(ln => ({
+      ln, chars: $$('.ch', ln).map(el => ({ el, x: 0 })), x0: 0, w: 1,
+      cps: Array.from({ length: N }, () => ({ y: 0, v: 0 }))
+    }));
+    const cr = (a, b, c, d, t) => 0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t * t + (3 * b - a - 3 * c + d) * t * t * t);
+    const rand = (a, b) => a + Math.random() * (b - a);
+    let idle = 0, idleTarget = 0, active = false;
+
+    function measure() {
+      lines.forEach(L => {
+        if (!L.chars.length) return;
+        L.chars.forEach(c => { c.x = c.el.offsetLeft + c.el.offsetWidth / 2; });
+        const first = L.chars[0].el, last = L.chars[L.chars.length - 1].el;
+        L.x0 = first.offsetLeft;
+        L.w = Math.max(1, last.offsetLeft + last.offsetWidth - L.x0);
+      });
+    }
+
+    function enter() {
+      if (reduce) return;
+      const R = Math.max(vw, vh);
+      let i = 0;
+      lines.forEach(L => L.chars.forEach(c => {
+        const a = rand(0, Math.PI * 2), r = rand(0.45, 0.8) * R;
+        const S = [Math.cos(a) * r, Math.sin(a) * r * 0.7];
+        const nl = Math.hypot(S[0], S[1]) || 1, sw = rand(-0.4, 0.4) * r;
+        const C1 = [S[0] * 0.45 - (S[1] / nl) * sw, S[1] * 0.45 + (S[0] / nl) * sw]; // swirl off the straight line
+        const C2 = [rand(-24, 24), rand(-70, -30)];                                  // overshoot above home
+        const P = [S, S, C1, C2, [0, 0], [0, 0]];
+        const SEG = 12, total = SEG * 3, rot0 = rand(-120, 120), sc0 = rand(0.45, 0.7);
+        const frames = [];
+        let px = S[0];
+        for (let s = 0; s <= total; s++) {
+          const seg = Math.min(2, Math.floor(s / SEG)), t = s / SEG - seg, u = s / total;
+          const x = cr(P[seg][0], P[seg + 1][0], P[seg + 2][0], P[seg + 3][0], t);
+          const y = cr(P[seg][1], P[seg + 1][1], P[seg + 2][1], P[seg + 3][1], t);
+          const bank = clamp((x - px) * 0.5, -35, 35) * (1 - u); // lean into horizontal travel
+          px = x;
+          const rot = rot0 * (1 - u) * (1 - u) + bank;
+          const sc = sc0 + (1 - sc0) * (1 - (1 - u) * (1 - u));
+          frames.push({ transform: `translate(${x.toFixed(1)}px,${y.toFixed(1)}px) rotate(${rot.toFixed(1)}deg) scale(${sc.toFixed(3)})`, opacity: Math.min(1, u * 5) });
+        }
+        c.el.animate(frames, { duration: 1800, delay: 150 + i++ * 55, easing: 'cubic-bezier(0.77, 0, 0.175, 1)', fill: 'backwards' });
+      }));
+      active = true;
+      setTimeout(() => (idleTarget = 1), 150 + i * 55 + 1600);
+    }
+
+    function tick(t, dt, sy) {
+      if (!active || sy > vh * 1.2) return;
+      idle = lerp(idle, idleTarget, 0.02 * dt);
+      lines.forEach((L, li) => {
+        if (!L.chars.length) return;
+        const r = L.ln.getBoundingClientRect(), ox = r.left - L.ln.offsetLeft;
+        const dy = my - (r.top + r.height / 2), band = r.height * 1.1;
+        const pull = fine && mx > -100 && Math.abs(dy) < band
+          ? clamp(dy * 0.7, -r.height * 0.3, r.height * 0.3) * (1 - (dy / band) ** 2) : 0;
+        const amp = idle * r.height * 0.03;
+        L.cps.forEach((p, k) => {
+          const g = Math.exp(-(((mx - (ox + L.x0 + (L.w * k) / (N - 1))) / (L.w * 0.2)) ** 2));
+          const target = amp * Math.sin(t * 0.0011 + k * 0.85 + li * 1.7) + pull * g;
+          p.v = (p.v + (target - p.y) * 0.07 * dt) * Math.pow(0.84, dt);
+          p.y += p.v * dt;
+        });
+        const Y = L.cps.map(p => p.y);
+        const at = x => {
+          const f = clamp((x - L.x0) / L.w) * (N - 1), k = Math.min(N - 2, Math.floor(f));
+          return cr(Y[Math.max(0, k - 1)], Y[k], Y[k + 1], Y[Math.min(N - 1, k + 2)], f - k);
+        };
+        L.chars.forEach(c => {
+          const y = at(c.x), slope = (at(c.x + 4) - at(c.x - 4)) / 8;
+          c.el.style.translate = `0 ${y.toFixed(2)}px`;
+          c.el.style.rotate = `${clamp(Math.atan(slope) * 57.3, -18, 18).toFixed(2)}deg`;
+        });
+      });
+    }
+
+    document.documentElement.addEventListener('pointerleave', () => { mx = my = -300; });
+    return { measure, enter, tick };
+  })();
+
   /* ---- about: words that light up on scroll ---- */
   const words = $('#aboutWords');
   (function wrapWords(node) {
@@ -766,6 +857,7 @@ footer button{color:var(--fg)}
     document.body.classList.remove('loading');
     document.body.classList.add('ready');
     $('#heroTitle').classList.add('in');
+    heroSpline.enter();
     $$('.hero [data-reveal]').forEach(el => el.classList.add('in'));
     if (lenis) lenis.start();
     setTimeout(() => loader.remove(), 1400);
@@ -963,12 +1055,12 @@ footer button{color:var(--fg)}
 
   function layout() {
     vw = innerWidth; vh = innerHeight;
-    layoutHS(); layoutCanvas(); measureMarquees();
+    layoutHS(); layoutCanvas(); measureMarquees(); heroSpline.measure();
   }
   let rt;
   addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(layout, 150); });
   layout();
-  document.fonts.ready.then(() => { measureMarquees(); layoutHS(); });
+  document.fonts.ready.then(() => { measureMarquees(); layoutHS(); heroSpline.measure(); });
   addEventListener('load', layoutHS);
 
   let lastSy = scrollY, boost = 0, sign = 1, lastT = performance.now();
@@ -1043,6 +1135,7 @@ footer button{color:var(--fg)}
       k.el.style.transform = Math.abs(k.rx) + Math.abs(k.ry) < 0.01 ? '' : `perspective(900px) rotateX(${k.rx.toFixed(2)}deg) rotateY(${k.ry.toFixed(2)}deg)`;
     });
 
+    heroSpline.tick(t, dt, sy);
     drawCanvas(sy, dt);
     requestAnimationFrame(frame);
   }
